@@ -12,24 +12,32 @@ import (
 	"github.com/ossf/osv-schema/bindings/go/osvschema"
 )
 
+// calculateMaxSeverities returns the highest severity score and the highest
+// ecosystem priority (such as Ubuntu's) across all the records that make up
+// the group.
+//
+// All records that share an ID contribute, even if they were reported by
+// different sources, so the result does not depend on which report happened to
+// be seen last.
 func calculateMaxSeverities(group models.GroupInfo, pkg models.PackageVulns) (string, string) {
-	var maxSeverity float64 = -1
+	var severities []*osvschema.Severity
 	var maxUbuntuSeverity string
+
 	for _, vulnID := range group.IDs {
-		var severities []*osvschema.Severity
 		for _, vuln := range pkg.Vulnerabilities {
-			if vuln.GetId() == vulnID {
-				severities = vuln.GetSeverity()
+			if vuln.GetId() != vulnID {
+				continue
 			}
+
+			severities = append(severities, vuln.GetSeverity()...)
+			maxUbuntuSeverity = severity.MaxUbuntuPriority(
+				maxUbuntuSeverity,
+				severity.FindUbuntuSeverity(vuln.GetSeverity()),
+			)
 		}
-		score, _, _ := severity.CalculateOverallScore(severities)
-		maxSeverity = max(maxSeverity, score)
-		maxUbuntuSeverity = severity.MaxUbuntuPriority(
-			maxUbuntuSeverity,
-			severity.FindUbuntuSeverity(severities),
-		)
 	}
 
+	maxSeverity := severity.CalculateMaxScore(severities)
 	if maxSeverity < 0 {
 		return "", maxUbuntuSeverity
 	}

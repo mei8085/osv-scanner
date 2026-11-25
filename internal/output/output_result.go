@@ -468,8 +468,6 @@ func processSource(packageSource models.PackageSource) map[string]SourceResult {
 // called and uncalled vulnerabilities, fixable counts, and layer information (if available).
 func processPackage(vulnPkg models.PackageVulns) PackageResult {
 	regularVulnMap, hiddenVulnMap := processVulnGroups(vulnPkg)
-	updateVuln(regularVulnMap, vulnPkg)
-	updateVuln(hiddenVulnMap, vulnPkg)
 
 	regularVulnList := getVulnList(regularVulnMap)
 	hiddenVulnList := getVulnList(hiddenVulnMap)
@@ -498,6 +496,13 @@ func processPackage(vulnPkg models.PackageVulns) PackageResult {
 
 // processVulnGroups processes vulnerability groups within a package.
 //
+// Each group describes one security event, so the result for a group is
+// computed from every record that belongs to it: descriptions and remediation
+// information are aggregated rather than taken from whichever record happened
+// to be seen last. The aggregation only depends on the contents of the group,
+// not on the order its records were reported in, and becomes more complete as
+// more aliases of the same event are known.
+//
 // Returns:
 //
 //	regularVulnMap: A map of regular vulnerabilities, keyed by their representative ID.
@@ -506,21 +511,39 @@ func processVulnGroups(vulnPkg models.PackageVulns) (map[string]VulnResult, map[
 	regularVulnMap := make(map[string]VulnResult)
 	hiddenVulnMap := make(map[string]VulnResult)
 
-	for _, group := range vulnPkg.Groups {
-		representID := group.IDs[0]
+	for _, rawGroup := range vulnPkg.Groups {
+		group := rawGroup.Canonicalize()
+
+		// A group's records are identified by its IDs; fall back to the
+		// aliases if the group has no IDs (for example, when the groups were
+		// provided externally rather than built by the grouper).
+		matchingIDs := group.IDs
+		if len(matchingIDs) == 0 {
+			matchingIDs = group.Aliases
+		}
+		if len(matchingIDs) == 0 {
+			continue
+		}
+
+		representID := matchingIDs[0]
+
 		var aliases []string
-		if len(group.Aliases) > 0 && slices.Contains(group.Aliases, representID) {
-			for _, val := range group.Aliases {
-				if val != representID {
-					aliases = append(aliases, val)
-				}
+		for _, val := range group.Aliases {
+			if val != representID {
+				aliases = append(aliases, val)
 			}
 		}
 
+		records := recordsInGroup(matchingIDs, vulnPkg.Vulnerabilities)
+		fixable, fixedVersion := aggregateGroupFix(records, vulnPkg.Package)
+
 		vuln := VulnResult{
 			ID:                representID,
-			GroupIDs:          group.IDs,
+			GroupIDs:          matchingIDs,
 			Aliases:           aliases,
+			Description:       groupDescription(records),
+			IsFixable:         fixable,
+			FixedVersion:      fixedVersion,
 			SeverityScore:     group.MaxSeverity,
 			EcosystemPriority: group.EcosystemPriority,
 		}
@@ -545,20 +568,166 @@ func processVulnGroups(vulnPkg models.PackageVulns) (map[string]VulnResult, map[
 	return regularVulnMap, hiddenVulnMap
 }
 
-// updateVuln updates each vulnerability info in vulnMap from the details of vulnPkg.Vulnerabilities.
-func updateVuln(vulnMap map[string]VulnResult, vulnPkg models.PackageVulns) {
-	for _, vuln := range vulnPkg.Vulnerabilities {
-		fixable, fixedVersion := getNextFixVersion(vuln.GetAffected(), vulnPkg.Package.Version, vulnPkg.Package.Name, vulnPkg.Package.Ecosystem)
-		if outputVuln, exist := vulnMap[vuln.GetId()]; exist {
-			outputVuln.FixedVersion = fixedVersion
-			outputVuln.IsFixable = fixable
-			outputVuln.Description = vuln.GetSummary()
-			if outputVuln.Description == "" {
-				outputVuln.Description = vuln.GetDetails()
-			}
-			vulnMap[vuln.GetId()] = outputVuln
+// recordsInGroup returns the records of the package that describe the group,
+// in a deterministic order: first by the group's identifier preference, and
+// then by the record's own ID and contents so that records which share an ID
+// are ordered consistently too.
+func recordsInGroup(groupIDs []string, vulns []*osvschema.Vulnerability) []*osvschema.Vulnerability {
+	preference := make(map[string]int, len(groupIDs))
+	for i, id := range groupIDs {
+		preference[id] = i
+	}
+
+	matched := make([]*osvschema.Vulnerability, 0, len(vulns))
+
+	for _, vuln := range vulns {
+		if _, ok := preference[vuln.GetId()]; ok {
+			matched = append(matched, vuln)
 		}
 	}
+
+	slices.SortFunc(matched, func(a, b *osvschema.Vulnerability) int {
+		return cmp.Or(
+			cmp.Compare(preference[a.GetId()], preference[b.GetId()]),
+			strings.Compare(a.GetId(), b.GetId()),
+			strings.Compare(descriptionOf(a), descriptionOf(b)),
+			strings.Compare(a.GetSummary(), b.GetSummary()),
+			strings.Compare(a.GetDetails(), b.GetDetails()),
+		)
+	})
+
+	return matched
+}
+
+// descriptionOf returns the description to display for a record: its summary
+// if it has one, otherwise its details.
+func descriptionOf(vuln *osvschema.Vulnerability) string {
+	if summary := vuln.GetSummary(); summary != "" {
+		return summary
+	}
+
+	return vuln.GetDetails()
+}
+
+// groupDescription returns the description of the group, taken from the first
+// record in the group (in the group's preferred order) that has one.
+//
+// Preferring the earlier identifiers means that the most preferred advisory
+// wins, and because the records are already in a deterministic order, the
+// chosen description does not depend on how the records were reported.
+func groupDescription(records []*osvschema.Vulnerability) string {
+	for _, record := range records {
+		if description := descriptionOf(record); description != "" {
+			return description
+		}
+	}
+
+	return ""
+}
+
+// aggregateGroupFix computes the remediation for a group from all of its
+// related records.
+//
+// Upgrading only resolves the group when it resolves every record that
+// describes the installed package. If one of those records has no known fixed
+// version, the group is reported as unfixed: claiming a fix would tell users
+// the security event is resolved while one of its aliases remains open. Records
+// that do not apply to this package (for example, because they describe a
+// different package that happens to share an identifier) do not contribute, and
+// neither do records without any affected information, as there is nothing to
+// attribute to this package.
+//
+// When the group is fixable, the returned version is the highest of the fixed
+// versions of its records, since upgrading to a lower version would leave
+// another alias of the same event unresolved.
+func aggregateGroupFix(records []*osvschema.Vulnerability, pkg models.PackageInfo) (bool, string) {
+	if len(records) == 0 {
+		return false, UnfixedDescription
+	}
+
+	ecosystemPrefix, _, _ := strings.Cut(pkg.Ecosystem, ":")
+
+	// The reason no fix is available, taken from a record that describes the
+	// package when one exists; this preserves distinctions such as the
+	// installed version not being supported by the ecosystem's version scheme.
+	reason := UnfixedDescription
+	hasReason := false
+
+	fixedVersion := ""
+
+	for _, record := range records {
+		if len(record.GetAffected()) == 0 {
+			// Nothing to attribute to a package, so nothing to remediate.
+			continue
+		}
+
+		if !recordAffectsPackage(record.Affected, pkg) {
+			// The record describes a different package, so its remediation
+			// says nothing about this package.
+			continue
+		}
+
+		recordFixable, recordVersion := getNextFixVersion(
+			record.GetAffected(), pkg.Version, pkg.Name, pkg.Ecosystem,
+		)
+
+		if !recordFixable {
+			if !hasReason {
+				reason = recordVersion
+				hasReason = true
+			}
+
+			// One alias of the event cannot be resolved by upgrading, so the
+			// group as a whole cannot be either.
+			return false, reason
+		}
+
+		if fixedVersion == "" {
+			fixedVersion = recordVersion
+
+			continue
+		}
+
+		if compareFixVersions(recordVersion, fixedVersion, ecosystemPrefix) > 0 {
+			fixedVersion = recordVersion
+		}
+	}
+
+	if fixedVersion == "" {
+		return false, reason
+	}
+
+	return true, fixedVersion
+}
+
+// recordAffectsPackage reports whether any of the given affected entries
+// describes the installed package.
+func recordAffectsPackage(affected []*osvschema.Affected, pkg models.PackageInfo) bool {
+	for _, a := range affected {
+		if a.GetPackage() == nil {
+			continue
+		}
+		if a.GetPackage().GetName() == pkg.Name &&
+			removeVariants(a.GetPackage().GetEcosystem()) == removeVariants(pkg.Ecosystem) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// compareFixVersions compares two fixed versions using the ecosystem's version
+// rules, falling back to a plain string comparison when either version cannot
+// be parsed so that the result is always a total, deterministic order.
+func compareFixVersions(a, b, ecosystemPrefix string) int {
+	version, err := semantic.Parse(a, ecosystemPrefix)
+	if err == nil {
+		if order, compareErr := version.CompareStr(b); compareErr == nil && order != 0 {
+			return order
+		}
+	}
+
+	return strings.Compare(a, b)
 }
 
 func getVulnList(vulnMap map[string]VulnResult) []VulnResult {

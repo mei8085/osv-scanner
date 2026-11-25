@@ -1,6 +1,7 @@
 package grouper_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -334,4 +335,109 @@ func TestBuild(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestBuild_OrderIndependent ensures the derived information of a group (max
+// severity and ecosystem priority) only depends on the records that make up
+// the group, not on the order they were reported in nor on which source
+// reported them.
+func TestBuild_OrderIndependent(t *testing.T) {
+	t.Parallel()
+
+	pkgWith := func(vulns ...*osvschema.Vulnerability) models.PackageVulns {
+		return models.PackageVulns{
+			Package:         models.PackageInfo{Name: "mine1", Version: "1.2.3", Ecosystem: "npm"},
+			Vulnerabilities: vulns,
+		}
+	}
+
+	vulns := []*osvschema.Vulnerability{
+		{Id: "OSV-1", Severity: cvssV3("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N")},
+		{
+			Id:      "GHSA-123",
+			Aliases: []string{"OSV-1"},
+			Severity: []*osvschema.Severity{
+				{Type: osvschema.Severity_CVSS_V3, Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:L"},
+				{Type: osvschema.Severity_Ubuntu, Score: "low"},
+			},
+		},
+		{
+			Id:      "OSV-2",
+			Aliases: []string{"OSV-1"},
+			Severity: []*osvschema.Severity{
+				{Type: osvschema.Severity_Ubuntu, Score: "critical"},
+			},
+		},
+		// an unrelated vulnerability that must stay in its own group
+		{Id: "OSV-3", Severity: cvssV3("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N")},
+	}
+
+	want := grouper.Build(pkgWith(vulns...), false)
+
+	// the group and its derived info must not depend on the order the records
+	// are reported in
+	for _, perm := range permutations(vulns) {
+		if diff := cmp.Diff(want, grouper.Build(pkgWith(perm...), false)); diff != "" {
+			t.Fatalf("Build() differs for record order %s (-want +got):\n%s", idsOfVulns(perm), diff)
+		}
+	}
+
+	if len(want) != 2 {
+		t.Fatalf("expected the unrelated vulnerability to stay in its own group, got %v", want)
+	}
+
+	// the highest severity and the highest priority across every alias of the
+	// event are used
+	if want[0].MaxSeverity != "8.3" {
+		t.Errorf("expected max severity 8.3, got %q", want[0].MaxSeverity)
+	}
+	if want[0].EcosystemPriority != "critical" {
+		t.Errorf("expected ecosystem priority critical, got %q", want[0].EcosystemPriority)
+	}
+	if len(want[0].IDs) != 3 {
+		t.Errorf("expected three aliases in the event's group, got %v", want[0].IDs)
+	}
+
+	// the unrelated vulnerability's severity is not folded into the event
+	if want[0].MaxSeverity == want[1].MaxSeverity {
+		t.Errorf("expected the groups to have their own severity, both were %q", want[1].MaxSeverity)
+	}
+}
+
+// TestBuild_DuplicateRecords ensures the same record reported by multiple
+// sources (for example as both a lockfile and an SBOM match) does not create
+// duplicate groups, IDs or analysis entries.
+func TestBuild_DuplicateRecords(t *testing.T) {
+	t.Parallel()
+
+	vuln := func() *osvschema.Vulnerability {
+		return &osvschema.Vulnerability{
+			Id:       "OSV-1",
+			Severity: cvssV3("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"),
+		}
+	}
+
+	pkg := models.PackageVulns{
+		Package:         models.PackageInfo{Name: "mine1", Version: "1.2.3", Ecosystem: "npm"},
+		Vulnerabilities: []*osvschema.Vulnerability{vuln(), vuln(), vuln()},
+	}
+
+	got := grouper.Build(pkg, false)
+
+	want := []models.GroupInfo{
+		{IDs: []string{"OSV-1"}, Aliases: []string{"OSV-1"}, MaxSeverity: "8.8"},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Build() returned an unexpected result for duplicate records (-want +got):\n%s", diff)
+	}
+}
+
+// idsOfVulns returns a human readable description of the given vulnerabilities.
+func idsOfVulns(vulns []*osvschema.Vulnerability) string {
+	ids := make([]string, 0, len(vulns))
+	for _, v := range vulns {
+		ids = append(ids, v.GetId())
+	}
+
+	return strings.Join(ids, ", ")
 }

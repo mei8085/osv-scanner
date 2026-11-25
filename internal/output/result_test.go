@@ -162,3 +162,83 @@ func Test_groupSARIFFindings_Merging(t *testing.T) {
 		})
 	}
 }
+
+// Test_groupSARIFFindings_CrossSource ensures an event that is reported by
+// several sources, possibly with differing amounts of detail, still forms one
+// rule whose records and packages are all accounted for, and whose content does
+// not depend on the order the sources are listed in.
+func Test_groupSARIFFindings_CrossSource(t *testing.T) {
+	t.Parallel()
+
+	type groupSummary struct {
+		DisplayID     string
+		AliasedIDList []string
+		Packages      []string
+	}
+
+	sourceA := models.SourceInfo{Path: "/path/to/lockfile", Type: models.SourceTypeProjectPackage}
+	sourceB := models.SourceInfo{Path: "/path/to/sbom.cdx.json", Type: models.SourceTypeSBOM}
+
+	pkg := func(name, version, id, summary string, aliases ...string) models.PackageVulns {
+		return models.PackageVulns{
+			Package: models.PackageInfo{Name: name, Version: version, Ecosystem: "npm"},
+			Vulnerabilities: []*osvschema.Vulnerability{{
+				Id:      id,
+				Summary: summary,
+				Aliases: aliases,
+			}},
+		}
+	}
+
+	// the same advisory, reported by a lockfile with full detail and by an SBOM
+	// with none; plus a distinct vulnerability only the SBOM reports
+	detailed := pkg("pkg-a", "1.0.0", "OSV-1", "scary!", "CVE-1")
+	sparse := pkg("pkg-a", "1.0.0", "OSV-1", "")
+	distinct := pkg("pkg-b", "1.0.0", "OSV-2", "also scary!", "CVE-2")
+
+	build := func(results []models.PackageSource) []groupSummary {
+		groups := groupSARIFFindings(&models.VulnerabilityResults{Results: results})
+
+		summaries := make([]groupSummary, 0, len(groups))
+		for _, g := range groups {
+			summary := groupSummary{DisplayID: g.DisplayID, AliasedIDList: g.AliasedIDList}
+			for _, pws := range g.PkgSource.StableKeys() {
+				summary.Packages = append(summary.Packages, pws.Package.Name+"@"+pws.Package.Version)
+			}
+			summaries = append(summaries, summary)
+		}
+
+		return summaries
+	}
+
+	forward := build([]models.PackageSource{
+		{Source: sourceA, Packages: []models.PackageVulns{detailed}},
+		{Source: sourceB, Packages: []models.PackageVulns{sparse, distinct}},
+	})
+	reversed := build([]models.PackageSource{
+		{Source: sourceB, Packages: []models.PackageVulns{distinct, sparse}},
+		{Source: sourceA, Packages: []models.PackageVulns{detailed}},
+	})
+
+	want := []groupSummary{
+		// the same package in two different sources stays traceable to both
+		{DisplayID: "CVE-1", AliasedIDList: []string{"CVE-1", "OSV-1"}, Packages: []string{"pkg-a@1.0.0", "pkg-a@1.0.0"}},
+		{DisplayID: "CVE-2", AliasedIDList: []string{"CVE-2", "OSV-2"}, Packages: []string{"pkg-b@1.0.0"}},
+	}
+
+	if diff := cmp.Diff(want, forward); diff != "" {
+		t.Errorf("groupSARIFFindings() mismatch for cross-source records (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff(forward, reversed); diff != "" {
+		t.Errorf("groupSARIFFindings() must not depend on source order (-forward +reversed):\n%s", diff)
+	}
+
+	// the more detailed record is the one kept for the shared ID
+	groups := groupSARIFFindings(&models.VulnerabilityResults{Results: []models.PackageSource{
+		{Source: sourceA, Packages: []models.PackageVulns{detailed}},
+		{Source: sourceB, Packages: []models.PackageVulns{sparse, distinct}},
+	}})
+	if got := groups[0].AliasedVulns["OSV-1"].GetSummary(); got != "scary!" {
+		t.Errorf("expected the detailed record to be kept, got summary %q", got)
+	}
+}

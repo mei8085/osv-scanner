@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/osv-scanner/v2/internal/grouper"
 	"github.com/google/osv-scanner/v2/pkg/models"
 )
@@ -201,7 +200,9 @@ func TestGroup(t *testing.T) {
 			},
 		},
 		{
-			name: "groups are ordered by their earliest record",
+			// groups are sorted by their representative ID, so the order the
+			// records are given in does not affect the order of the groups
+			name: "groups are ordered by their representative id",
 			vulns: []grouper.IDAliases{
 				{ID: "GO-2"},
 				{ID: "GHSA-aaaa", Aliases: []string{"CVE-1"}},
@@ -209,8 +210,34 @@ func TestGroup(t *testing.T) {
 				{ID: "PYSEC-1", Aliases: []string{"CVE-1"}},
 			},
 			want: []models.GroupInfo{
+				{IDs: []string{"GO-1"}, Aliases: []string{"GO-1"}},
 				{IDs: []string{"GO-2"}, Aliases: []string{"GO-2"}},
 				{IDs: []string{"PYSEC-1", "GHSA-aaaa"}, Aliases: []string{"CVE-1", "GHSA-aaaa", "PYSEC-1"}},
+			},
+		},
+		{
+			// the same record reported more than once is one security event
+			// with one identity, not one group per report
+			name: "duplicate records contribute a single id",
+			vulns: []grouper.IDAliases{
+				{ID: "GHSA-aaaa", Aliases: []string{"CVE-1"}},
+				{ID: "GHSA-aaaa", Aliases: []string{"CVE-1"}},
+				{ID: "PYSEC-1", Aliases: []string{"CVE-1"}},
+			},
+			want: []models.GroupInfo{
+				{IDs: []string{"PYSEC-1", "GHSA-aaaa"}, Aliases: []string{"CVE-1", "GHSA-aaaa", "PYSEC-1"}},
+			},
+		},
+		{
+			// an empty identifier carries no identity and must not link
+			// otherwise-unrelated records together
+			name: "records with empty ids are not linked",
+			vulns: []grouper.IDAliases{
+				{ID: "", Aliases: []string{""}},
+				{ID: "GO-1"},
+				{ID: ""},
+			},
+			want: []models.GroupInfo{
 				{IDs: []string{"GO-1"}, Aliases: []string{"GO-1"}},
 			},
 		},
@@ -259,12 +286,8 @@ func TestGroup_OrderIndependent(t *testing.T) {
 		},
 	}
 
-	// the order of the groups follows the order of the records, so only what
-	// is in each group should be the same regardless of the order
-	ignoreGroupOrder := cmpopts.SortSlices(func(a, b models.GroupInfo) bool {
-		return a.IDs[0] < b.IDs[0]
-	})
-
+	// the result is canonical, so every ordering of the same records must
+	// produce exactly the same groups, including their order
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -272,7 +295,7 @@ func TestGroup_OrderIndependent(t *testing.T) {
 			want := grouper.Group(tt.vulns)
 
 			for _, perm := range permutations(tt.vulns) {
-				if diff := cmp.Diff(want, grouper.Group(perm), ignoreGroupOrder); diff != "" {
+				if diff := cmp.Diff(want, grouper.Group(perm)); diff != "" {
 					// only report the first order that differs, as there can be thousands
 					t.Fatalf("Group() returned a different result for the order [%s] (-want +got):\n%s", idsOf(perm), diff)
 				}

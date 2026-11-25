@@ -1,6 +1,8 @@
 package models
 
 import (
+	"bytes"
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -75,9 +77,19 @@ func (vulns *VulnerabilityResults) Flatten() []VulnerabilityFlattened {
 	return results
 }
 
+// getGroupInfoForVuln returns the group that the vulnerability is in, or the
+// zero GroupInfo if the vulnerability is not part of any group. A record
+// listed as an alias of a group belongs to that group even if it is not one of
+// the group's IDs, so externally provided groups keep their records traceable.
 func getGroupInfoForVuln(groups []GroupInfo, vulnID string) GroupInfo {
-	// groupIdx should never be -1 since vulnerabilities should always be in one group
 	groupIdx := slices.IndexFunc(groups, func(g GroupInfo) bool { return slices.Contains(g.IDs, vulnID) })
+	if groupIdx == -1 {
+		groupIdx = slices.IndexFunc(groups, func(g GroupInfo) bool { return slices.Contains(g.Aliases, vulnID) })
+	}
+	if groupIdx == -1 {
+		return GroupInfo{}
+	}
+
 	return groups[groupIdx]
 }
 
@@ -217,35 +229,63 @@ type PackageVulns struct {
 // It is required because the Vulnerabilities field is a slice of proto messages,
 // which requires protojson to marshal, while the rest of the struct uses
 // the standard encoding/json library.
+//
+// The vulnerabilities and groups are emitted in a canonical order, so that the
+// machine report does not depend on the order the records happened to be
+// reported in. The receiver is not modified, so marshaling the same results
+// twice always produces the same bytes.
 func (p *PackageVulns) MarshalJSON() ([]byte, error) {
 	// Use alias to avoid recursion.
 	type alias PackageVulns
 
+	type rawVulnerability struct {
+		id  string
+		raw json.RawMessage
+	}
+
 	// Pre-process the custom field.
 	var rawVulnerabilities []json.RawMessage
 	if len(p.Vulnerabilities) > 0 {
-		rawVulnerabilities = make([]json.RawMessage, 0, len(p.Vulnerabilities))
-
-		slices.SortFunc(p.Vulnerabilities, func(a, b *osvschema.Vulnerability) int {
-			return identifiers.IDSortFunc(a.GetId(), b.GetId())
-		})
+		sorted := make([]rawVulnerability, 0, len(p.Vulnerabilities))
 
 		for _, vuln := range p.Vulnerabilities {
 			unstableJSON, err := protojson.Marshal(vuln)
 			if err != nil {
 				return nil, fmt.Errorf("failed to marshal vulnerability: %w", err)
 			}
-			var vuln any
-			if err := json.Unmarshal(unstableJSON, &vuln); err != nil {
+			var normalized any
+			if err := json.Unmarshal(unstableJSON, &normalized); err != nil {
 				return nil, err
 			}
-			b, err := json.Marshal(vuln)
+			b, err := json.Marshal(normalized)
 			if err != nil {
 				return nil, err
 			}
-			rawVulnerabilities = append(rawVulnerabilities, b)
+			sorted = append(sorted, rawVulnerability{id: vuln.GetId(), raw: b})
+		}
+
+		// Sort by ID first, as that is the identity of the record, and then by
+		// the record's content so that records that share an ID (for example
+		// because two sources reported the same advisory) also have a stable
+		// relative order.
+		slices.SortFunc(sorted, func(a, b rawVulnerability) int {
+			return cmp.Or(
+				identifiers.IDSortFunc(a.id, b.id),
+				bytes.Compare(a.raw, b.raw),
+			)
+		})
+
+		rawVulnerabilities = make([]json.RawMessage, 0, len(sorted))
+		for _, vuln := range sorted {
+			rawVulnerabilities = append(rawVulnerabilities, vuln.raw)
 		}
 	}
+
+	// Work on a copy so the groups can be replaced with their canonical form
+	// without modifying the receiver. The vulnerabilities field is shadowed
+	// below so this copy's vulnerabilities are never marshaled directly.
+	canonical := *p
+	canonical.Groups = CanonicalizeRecordGroups(p.Groups)
 
 	// Marshal a temporary struct that combines the standard
 	// fields (from the alias) with the custom-handled field.
@@ -254,7 +294,7 @@ func (p *PackageVulns) MarshalJSON() ([]byte, error) {
 
 		Vulnerabilities []json.RawMessage `json:"vulnerabilities,omitempty"`
 	}{
-		alias:           (*alias)(p),
+		alias:           (*alias)(&canonical),
 		Vulnerabilities: rawVulnerabilities,
 	})
 }
@@ -308,6 +348,77 @@ type GroupInfo struct {
 	EcosystemPriority    string                  `json:"-"`
 }
 
+// Canonicalize returns a copy of the group whose ID and alias lists are in the
+// order used in reports: IDs sorted by identifier preference and aliases
+// sorted lexicographically, both without duplicates. The receiver is not
+// modified, so the same group can be canonicalized any number of times.
+func (groupInfo GroupInfo) Canonicalize() GroupInfo {
+	canonical := groupInfo
+
+	canonical.IDs = slices.Clone(groupInfo.IDs)
+	slices.SortFunc(canonical.IDs, identifiers.IDSortFunc)
+	canonical.IDs = slices.Compact(canonical.IDs)
+
+	canonical.Aliases = slices.Clone(groupInfo.Aliases)
+	canonical.Aliases = slices.DeleteFunc(canonical.Aliases, func(alias string) bool { return alias == "" })
+	slices.Sort(canonical.Aliases)
+	canonical.Aliases = slices.Compact(canonical.Aliases)
+
+	return canonical
+}
+
+// CanonicalizeRecordGroups returns a canonical copy of the given groups.
+//
+// This is useful before marshalling when the groups may have been provided
+// externally (for example, loaded from JSON) rather than built by the grouper,
+// so the report is in the same canonical form either way.
+func CanonicalizeRecordGroups(groups []GroupInfo) []GroupInfo {
+	if len(groups) == 0 {
+		return groups
+	}
+
+	canonical := make([]GroupInfo, len(groups))
+	for i, group := range groups {
+		canonical[i] = group.Canonicalize()
+	}
+	SortGroups(canonical)
+
+	return canonical
+}
+
+// CompareGroupInfo compares two groups by their canonical ID and alias lists,
+// giving a total order that only depends on the groups' contents.
+//
+// The derived fields are used as tie-breakers so that two groups describing the
+// same identifiers but with different derived information still have a stable
+// relative order.
+//
+// Both groups are expected to have already been canonicalized.
+func CompareGroupInfo(a, b GroupInfo) int {
+	return cmp.Or(
+		compareIdentifiers(a.IDs, b.IDs),
+		compareIdentifiers(a.Aliases, b.Aliases),
+		cmp.Compare(a.MaxSeverity, b.MaxSeverity),
+		cmp.Compare(a.EcosystemPriority, b.EcosystemPriority),
+	)
+}
+
+// SortGroups sorts groups into the canonical order used in reports.
+func SortGroups(groups []GroupInfo) {
+	slices.SortFunc(groups, CompareGroupInfo)
+}
+
+// compareIdentifiers compares two sorted lists of identifiers element-wise.
+func compareIdentifiers(a, b []string) int {
+	for i := range min(len(a), len(b)) {
+		if c := identifiers.IDSortFunc(a[i], b[i]); c != 0 {
+			return c
+		}
+	}
+
+	return cmp.Compare(len(a), len(b))
+}
+
 // IsCalled returns true if any analysis performed determines that the vulnerability is being called
 // Also returns true if no analysis is performed
 func (groupInfo *GroupInfo) IsCalled() bool {
@@ -339,8 +450,12 @@ func (groupInfo *GroupInfo) IsGroupUnimportant() bool {
 }
 
 func (groupInfo *GroupInfo) IndexString() string {
-	// Assumes IDs is sorted
-	return strings.Join(groupInfo.IDs, ",")
+	// Sort a copy so the key is stable even if the group was provided
+	// externally in a different order.
+	ids := slices.Clone(groupInfo.IDs)
+	slices.SortFunc(ids, identifiers.IDSortFunc)
+
+	return strings.Join(ids, ",")
 }
 
 type AnalysisInfo struct {

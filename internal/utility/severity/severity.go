@@ -88,6 +88,28 @@ func CalculateOverallScore(severities []*osvschema.Severity) (float64, string, e
 	return maxScore, maxRating, nil
 }
 
+// CalculateMaxScore returns the highest score of any of the given severities,
+// or -1 if none of them has a usable score.
+//
+// Unlike CalculateOverallScore, severities that cannot be parsed are skipped,
+// so a single malformed record does not hide the score reported by the other
+// records of the same vulnerability, and the result only depends on the set of
+// severities rather than the order they are given in.
+func CalculateMaxScore(severities []*osvschema.Severity) float64 {
+	maxScore := -1.0
+
+	for _, severity := range severities {
+		score, _, err := CalculateScore(severity)
+		if err != nil || score < 0 {
+			continue
+		}
+
+		maxScore = max(maxScore, score)
+	}
+
+	return maxScore
+}
+
 func CalculateRating(score string) (Rating, error) {
 	// All CSVs' rating methods are identical.
 	parsedScore, err := strconv.ParseFloat(score, 64)

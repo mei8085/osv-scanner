@@ -1,6 +1,7 @@
 package output
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/osv-scanner/v2/internal/grouper"
 	"github.com/google/osv-scanner/v2/internal/identifiers"
+	"github.com/google/osv-scanner/v2/internal/utility/severity"
 	"github.com/google/osv-scanner/v2/internal/utility/vulns"
 	"github.com/google/osv-scanner/v2/pkg/models"
 	"github.com/ossf/osv-schema/bindings/go/osvschema"
@@ -233,28 +235,91 @@ func groupSARIFFindings(vulnResults *models.VulnerabilityResults) []*groupedSARI
 	for _, res := range vulnResults.Results {
 		for _, pkg := range res.Packages {
 			for _, v := range pkg.Vulnerabilities {
+				entry, ok := results[v.GetId()]
+				if !ok {
+					// A record without an identifier has no stable identity to
+					// report, and one that is not in any group cannot be
+					// attributed to one.
+					continue
+				}
+
 				newPkgSource := pkgWithSource{
 					Package: pkg.Package,
 					Source:  res.Source,
 				}
-				entry := results[v.GetId()]
 				entry.PkgSource[newPkgSource] = struct{}{}
-				entry.AliasedVulns[v.GetId()] = v
+				// The same ID can be reported by several sources with
+				// differing amounts of detail, so keep the most complete
+				// record deterministically rather than whichever came last.
+				if existing, seen := entry.AliasedVulns[v.GetId()]; !seen ||
+					compareVulnerabilityCompleteness(v, existing) < 0 {
+					entry.AliasedVulns[v.GetId()] = v
+				}
 				entry.AliasedIDList = append(entry.AliasedIDList, v.GetId())
 				entry.AliasedIDList = append(entry.AliasedIDList, v.GetAliases()...)
 			}
 		}
 	}
 
+	visible := make([]*groupedSARIFFinding, 0, len(groups))
+
 	for _, gs := range groups {
 		slices.SortFunc(gs.AliasedIDList, identifiers.IDSortFunc)
+		gs.AliasedIDList = slices.DeleteFunc(gs.AliasedIDList, func(id string) bool { return id == "" })
 		gs.AliasedIDList = slices.Compact(gs.AliasedIDList)
+
+		if len(gs.AliasedIDList) == 0 {
+			// Nothing was reported for this group, so there is nothing to
+			// report as a SARIF rule.
+			continue
+		}
+
 		gs.DisplayID = gs.AliasedIDList[0]
+		visible = append(visible, gs)
 	}
 
-	slices.SortFunc(groups, func(a, b *groupedSARIFFinding) int {
+	slices.SortFunc(visible, func(a, b *groupedSARIFFinding) int {
 		return identifiers.IDSortFunc(a.DisplayID, b.DisplayID)
 	})
 
-	return groups
+	return visible
+}
+
+// compareVulnerabilityCompleteness orders vulnerability records so that the
+// most informative record comes first: a record with a summary and details
+// beats one with none, and remaining ties are broken by the record's stable
+// fields so the choice does not depend on the order the records were reported
+// in.
+//
+// Only exported fields are compared and nothing is serialized, so comparing
+// records never mutates them.
+func compareVulnerabilityCompleteness(a, b *osvschema.Vulnerability) int {
+	return cmp.Or(
+		cmp.Compare(completenessScore(b), completenessScore(a)),
+		strings.Compare(a.GetSummary(), b.GetSummary()),
+		strings.Compare(a.GetDetails(), b.GetDetails()),
+		strings.Compare(a.GetModified().String(), b.GetModified().String()),
+		cmp.Compare(len(a.GetAffected()), len(b.GetAffected())),
+		cmp.Compare(len(a.GetAliases()), len(b.GetAliases())),
+	)
+}
+
+// completenessScore returns a rough measure of how much information a record
+// has, so that records which describe the same ID can be compared.
+func completenessScore(v *osvschema.Vulnerability) int {
+	score := 0
+	if v.GetSummary() != "" {
+		score += 2
+	}
+	if v.GetDetails() != "" {
+		score++
+	}
+	if severity.CalculateMaxScore(v.GetSeverity()) >= 0 {
+		score++
+	}
+	if len(v.GetAffected()) > 0 {
+		score++
+	}
+
+	return score
 }

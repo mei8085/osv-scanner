@@ -216,6 +216,11 @@ osv-scanner scan --format json -L path/to/lockfile > /path/to/file.json
           ],
           // Grouping based on aliases, if two vulnerability share the same alias, or alias each other,
           // they are considered the same vulnerability, and is grouped here under the id field.
+          //
+          // Each group is one security event and has a stable identity: the same event reported by
+          // multiple sources (for example by a lockfile and an SBOM) is only listed once, its `ids`
+          // and `aliases` are sorted deterministically, and the groups themselves are sorted, so
+          // the output does not depend on the order the reports happened to arrive in.
           "groups": [
             {
               "ids": ["GHSA-c3h9-896r-86jm", "GO-2021-0053"],

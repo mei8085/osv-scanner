@@ -141,3 +141,54 @@ func TestSeverity_FindUbuntuSeverity(t *testing.T) {
 		})
 	}
 }
+
+func TestSeverity_CalculateMaxScore(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		severities []*osvschema.Severity
+		want       float64
+	}{
+		{
+			name:       "no_severities",
+			severities: nil,
+			want:       -1,
+		},
+		{
+			name: "highest_score_wins",
+			severities: []*osvschema.Severity{
+				{Type: osvschema.Severity_CVSS_V3, Score: "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N"},
+				{Type: osvschema.Severity_CVSS_V3, Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:L"},
+			},
+			want: 8.3,
+		},
+		{
+			// one malformed record must not hide the score of the others
+			name: "unparseable_severity_is_skipped",
+			severities: []*osvschema.Severity{
+				{Type: osvschema.Severity_CVSS_V3, Score: "not-a-vector"},
+				{Type: osvschema.Severity_CVSS_V3, Score: "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"},
+			},
+			want: 8.8,
+		},
+		{
+			name: "severities_without_a_score_are_ignored",
+			severities: []*osvschema.Severity{
+				{Type: osvschema.Severity_Ubuntu, Score: "negligible"},
+			},
+			want: -1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := severity.CalculateMaxScore(tt.severities)
+			if math.Abs(got-tt.want) > 0.001 {
+				t.Errorf("CalculateMaxScore() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

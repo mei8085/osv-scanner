@@ -29,8 +29,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-mc8h-8q98-g5hr",
-                "RUSTSEC-2023-0018"
+                "RUSTSEC-2023-0018",
+                "GHSA-mc8h-8q98-g5hr"
               ],
               "aliases": [
                 "GHSA-mc8h-8q98-g5hr",
@@ -180,8 +180,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-wcg3-cvx6-7396",
-                "RUSTSEC-2020-0071"
+                "RUSTSEC-2020-0071",
+                "GHSA-wcg3-cvx6-7396"
               ],
               "aliases": [
                 "GHSA-wcg3-cvx6-7396",
@@ -437,17 +437,6 @@
           "groups": [
             {
               "ids": [
-                "GHSA-fxg5-wq6x-vr4w",
-                "GO-2023-1495"
-              ],
-              "aliases": [
-                "GHSA-fxg5-wq6x-vr4w",
-                "GO-2023-1495"
-              ],
-              "max_severity": ""
-            },
-            {
-              "ids": [
                 "GO-2022-1144"
               ],
               "aliases": [
@@ -457,8 +446,19 @@
             },
             {
               "ids": [
-                "GHSA-vvpx-j8f3-3w6h",
-                "GO-2023-1571"
+                "GO-2023-1495",
+                "GHSA-fxg5-wq6x-vr4w"
+              ],
+              "aliases": [
+                "GHSA-fxg5-wq6x-vr4w",
+                "GO-2023-1495"
+              ],
+              "max_severity": ""
+            },
+            {
+              "ids": [
+                "GO-2023-1571",
+                "GHSA-vvpx-j8f3-3w6h"
               ],
               "aliases": [
                 "GHSA-vvpx-j8f3-3w6h",
@@ -933,19 +933,19 @@
           "groups": [
             {
               "ids": [
-                "GHSA-mrrw-grhq-86gf"
+                "RUSTSEC-2023-0015"
               ],
               "aliases": [
-                "GHSA-mrrw-grhq-86gf"
+                "RUSTSEC-2023-0015"
               ],
               "max_severity": ""
             },
             {
               "ids": [
-                "RUSTSEC-2023-0015"
+                "GHSA-mrrw-grhq-86gf"
               ],
               "aliases": [
-                "RUSTSEC-2023-0015"
+                "GHSA-mrrw-grhq-86gf"
               ],
               "max_severity": ""
             }
@@ -1079,8 +1079,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-mc8h-8q98-g5hr",
-                "RUSTSEC-2023-0018"
+                "RUSTSEC-2023-0018",
+                "GHSA-mc8h-8q98-g5hr"
               ],
               "aliases": [
                 "GHSA-mc8h-8q98-g5hr",
@@ -1230,8 +1230,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-wcg3-cvx6-7396",
-                "RUSTSEC-2020-0071"
+                "RUSTSEC-2020-0071",
+                "GHSA-wcg3-cvx6-7396"
               ],
               "aliases": [
                 "GHSA-wcg3-cvx6-7396",
@@ -1665,8 +1665,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-vvpx-j8f3-3w6h",
-                "GO-2023-1571"
+                "GO-2023-1571",
+                "GHSA-vvpx-j8f3-3w6h"
               ],
               "aliases": [
                 "GHSA-vvpx-j8f3-3w6h",
@@ -1960,8 +1960,8 @@
           "groups": [
             {
               "ids": [
-                "GHSA-wcg3-cvx6-7396",
-                "RUSTSEC-2020-0071"
+                "RUSTSEC-2020-0071",
+                "GHSA-wcg3-cvx6-7396"
               ],
               "aliases": [
                 "GHSA-wcg3-cvx6-7396",
