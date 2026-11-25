@@ -364,23 +364,8 @@ SBOMLoop:
 			return nil, nil, err
 		}
 
-		slices.SortFunc(sr.Inventory.Packages, inventorySort)
-		pkgMap := make(map[*extractor.Package]*extractor.Package)
-		var uniquePkgs []*extractor.Package
-		if len(sr.Inventory.Packages) > 0 {
-			kept := sr.Inventory.Packages[0]
-			uniquePkgs = append(uniquePkgs, kept)
-			for i := 1; i < len(sr.Inventory.Packages); i++ {
-				current := sr.Inventory.Packages[i]
-				if inventorySort(kept, current) == 0 {
-					pkgMap[current] = kept
-				} else {
-					kept = current
-					uniquePkgs = append(uniquePkgs, kept)
-				}
-			}
-		}
-		sr.Inventory.Packages = uniquePkgs
+		mergedPkgs, pkgMap := mergeDuplicatePackages(sr.Inventory.Packages)
+		sr.Inventory.Packages = mergedPkgs
 
 		for _, vuln := range sr.Inventory.PackageVulns {
 			if kept, ok := pkgMap[vuln.Package]; ok {
